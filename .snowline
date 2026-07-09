@@ -1,0 +1,5 @@
+version: 1
+scope: snowlinedev/snowline-musher
+name: Snowline Musher Plugin
+kind: project
+parent: snowlinedev
