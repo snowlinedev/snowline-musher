@@ -21,7 +21,9 @@ One engine, three dispatch surfaces:
 2. **MCP tools** — `musher__start_run` / `get_run` / `list_runs` /
    `cancel_run`, so any agent session can dispatch and supervise runs.
 3. **Work-item watcher** (phase 2) — picks up tracker items explicitly opted
-   in at triage and dispatches them through the same API.
+   in at triage and dispatches them through the same API. Tracker
+   integrations are optional provider adapters over the Snowline gateway;
+   musher is fully usable standalone via REST/MCP.
 
 ## Safety posture
 

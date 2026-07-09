@@ -100,17 +100,30 @@ gateway per the named-surfaces decision (`70b415fd`).
 
 ### 4.3 Work-item watcher (phase 2 — dispatch-by-API ships first)
 
-Polls PM for work items **explicitly opted in at triage** (mechanism to be
-settled with PM — a triage destination or an item flag; explicitly NOT
-"anything in the queue"). Dispatches via `POST /runs` with the item ref as
-origin; maps `recommended_model` → `model`. The watcher is deliberately dumb:
-judgment lives at triage time, not in the poller.
+Polls a work-item source for items **explicitly opted in at triage**
+(mechanism to be settled with the source plugin — a triage destination or an
+item flag; explicitly NOT "anything in the queue"). Dispatches via
+`POST /runs` with the item ref as origin; maps `recommended_model` → `model`.
+The watcher is deliberately dumb: judgment lives at triage time, not in the
+poller.
+
+Because the operator's PM plugin is **private** (see §5), the watcher is
+written against a small **provider contract** — list opted-in items, read
+their refs/model hints, mark dispatched — satisfied over the platform
+gateway's surfaces, never by importing another plugin's code. The private PM
+is one provider; a public deployment without it can drive musher entirely via
+REST/MCP (e.g. from GitHub issues through snowline-gh).
 
 ## 5. Integrations
 
-- **PM.** A run dispatched from a work item carries the item ref; when its PR
-  merges, PM's existing reconcile machinery completes the item — zero new
-  code on that side.
+- **PM — with a privacy boundary.** The operator's PM plugin (snowline-pm) is
+  a **private** repo; musher is public. The integration is therefore
+  contract-only: gateway REST/MCP surfaces, no code-level dependency in
+  either direction, and this public spec describes PM at the surface-contract
+  level only. Musher must be fully usable with no PM present (REST/MCP
+  dispatch stand alone). When PM *is* present: a run dispatched from a work
+  item carries the item ref, and PM's existing reconcile machinery completes
+  the item when the PR merges — zero new code on that side.
 - **GitHub plugin (snowline-gh).** Dispatches runs against
   snowline-platform issues through the REST spine; musher does not know or
   care that the objective came from a GitHub issue beyond the origin ref.
