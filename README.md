@@ -41,6 +41,20 @@ One engine, three dispatch surfaces:
 Spec-first, under active development. See
 [`docs/specs/musher.md`](docs/specs/musher.md) for the governing spec.
 
+## Development
+
+```sh
+uv sync                          # install deps (incl. dev group)
+uv run pytest                    # run the test suite
+uv run ruff check .              # lint
+uv run ruff format --check .     # format check
+uv run uvicorn snowline_musher.app:app --host 127.0.0.1 --port 8804  # run the service
+```
+
+The service is off by default: set `MUSHER_ENABLED=1` to enable the run
+engine once it exists. It always serves `/health`, and registers itself with
+the platform (`SNOWLINE_PLATFORM_URL`) on boot.
+
 ## License
 
 Apache-2.0
