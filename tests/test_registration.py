@@ -92,6 +92,17 @@ def test_register_transport_error_is_swallowed():
     )
 
 
+def test_register_malformed_platform_url_is_swallowed():
+    # httpx.InvalidURL is NOT an httpx.HTTPError — the never-raises contract
+    # must cover it too (a typo'd SNOWLINE_PLATFORM_URL must not crash boot,
+    # and must not stack-trace every heartbeat). The URL fails to parse, so
+    # no network is attempted.
+    assert (
+        registration.register_with_platform(platform_url="http://127.0.0.1:notaport")
+        is False
+    )
+
+
 def test_register_non_2xx_is_failure():
     assert (
         registration.register_with_platform(

@@ -98,6 +98,24 @@ def test_lifespan_starts_and_cancels_registration_heartbeat(monkeypatch):
     assert calls["beats"] >= 1
 
 
+def test_main_serves_on_configured_bind(monkeypatch):
+    """`python -m snowline_musher` binds MUSHER_BIND_HOST/MUSHER_BIND_PORT —
+    the knobs must actually reach uvicorn, or a tailnet deploy silently binds
+    loopback while advertising a tailnet base_url."""
+    import uvicorn
+
+    from snowline_musher.__main__ import main
+
+    seen = {}
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kw: seen.update(kw, app=app))
+    monkeypatch.setenv("MUSHER_BIND_HOST", "127.0.0.2")
+    monkeypatch.setenv("MUSHER_BIND_PORT", "9999")
+    main()
+    assert seen["app"] == "snowline_musher.app:app"
+    assert seen["host"] == "127.0.0.2"
+    assert seen["port"] == 9999
+
+
 def test_lifespan_skips_registration_when_disabled(monkeypatch):
     from snowline_musher import registration
 

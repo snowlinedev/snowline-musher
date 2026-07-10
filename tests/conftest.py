@@ -16,7 +16,6 @@ environment with no Postgres (e.g. plain CI with no service container).
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 import pytest
 
@@ -30,9 +29,10 @@ os.environ["MUSHER_DATABASE_URL"] = TEST_DB_URL
 
 import sqlalchemy as sa  # noqa: E402
 from alembic import command  # noqa: E402
-from alembic.config import Config  # noqa: E402
 
-MIGRATIONS = Path(__file__).parents[1] / "src" / "snowline_musher" / "migrations"
+# The shared programmatic Alembic config (script location + URL sourced in
+# one place); safe to import before the fixtures run — the DB layer is lazy.
+from snowline_musher.db import alembic_config, reset_engine  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -51,13 +51,6 @@ def _db_name(url: str) -> str:
 
 def _maintenance_url(url: str) -> str:
     return str(sa.make_url(url).set(database="postgres"))
-
-
-def alembic_config() -> Config:
-    cfg = Config()
-    cfg.set_main_option("script_location", str(MIGRATIONS))
-    cfg.set_main_option("sqlalchemy.url", os.environ["MUSHER_DATABASE_URL"])
-    return cfg
 
 
 def _postgres_reachable() -> bool:
@@ -108,8 +101,6 @@ def migrated_db() -> str:
             "Postgres not reachable at "
             f"{_maintenance_url(TEST_DB_URL)!r} — DB-backed tests skipped"
         )
-    from snowline_musher.db import reset_engine
-
     drop_database(TEST_DB_URL)
     create_database(TEST_DB_URL)
     reset_engine()

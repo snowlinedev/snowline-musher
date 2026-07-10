@@ -5,14 +5,19 @@ from snowline_musher.config import database_url
 from snowline_musher.models import Base
 
 config = context.config
-config.set_main_option("sqlalchemy.url", database_url())
+# Respect a caller-provided URL (the shared `db.alembic_config()` sets one);
+# only default to the env-derived URL when absent (the bare alembic CLI).
+# Overwriting unconditionally would silently redirect a caller who pointed a
+# Config at a different database.
+if not config.get_main_option("sqlalchemy.url"):
+    config.set_main_option("sqlalchemy.url", database_url())
 
 target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:
     context.configure(
-        url=database_url(),
+        url=config.get_main_option("sqlalchemy.url"),
         target_metadata=target_metadata,
         literal_binds=True,
         compare_type=True,

@@ -15,7 +15,9 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 
+from alembic.config import Config as AlembicConfig
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -23,6 +25,19 @@ from snowline_musher.config import database_url
 
 _engine: Engine | None = None
 _sessionmaker: sessionmaker[Session] | None = None
+
+MIGRATIONS = Path(__file__).resolve().parent / "migrations"
+
+
+def alembic_config(url: str | None = None) -> AlembicConfig:
+    """One Alembic `Config` for every programmatic caller — the app's
+    boot-migrate and the test harness source the script location and DB URL
+    here, in exactly one place (alembic.ini repeats them only for the CLI).
+    `url` defaults to the live `database_url()`."""
+    cfg = AlembicConfig()
+    cfg.set_main_option("script_location", str(MIGRATIONS))
+    cfg.set_main_option("sqlalchemy.url", url or database_url())
+    return cfg
 
 
 def get_engine() -> Engine:

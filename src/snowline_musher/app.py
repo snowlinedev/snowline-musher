@@ -21,10 +21,8 @@ does anything gated by it yet beyond existing as a config knob.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 import anyio
 from fastapi import FastAPI
@@ -36,12 +34,17 @@ log = logging.getLogger("snowline_musher.app")
 
 class _HeartbeatHttpxLogFilter(logging.Filter):
     """Drops httpx's per-request INFO line for the registration heartbeat's
-    `POST …/plugins` (one line per beat, forever) while letting every OTHER
-    httpx request trace through."""
+    `POST <platform>/plugins` (one line per beat, forever) while letting every
+    OTHER httpx request trace through — including a POST to some other host's
+    `/plugins` path. The platform URL is read per record, not captured, so the
+    filter can stay a module-level singleton (`addFilter` is idempotent for
+    the same object) and still track an env change."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
-        return not ("POST" in msg and "/plugins" in msg)
+        if "POST" not in msg:
+            return True
+        return f"{config.platform_url()}/plugins" not in msg
 
 
 _HEARTBEAT_HTTPX_FILTER = _HeartbeatHttpxLogFilter()
@@ -49,16 +52,13 @@ _HEARTBEAT_HTTPX_FILTER = _HeartbeatHttpxLogFilter()
 
 def _migrate_to_head() -> None:
     """Bring the musher DB to the latest Alembic head — services in this
-    codebase family boot-migrate in their lifespan. Reads the same DB URL the
-    app's sessions use, so a schema change deploys on a plain restart."""
+    codebase family boot-migrate in their lifespan, so a schema change
+    deploys on a plain restart."""
     from alembic import command
-    from alembic.config import Config
 
-    migrations = Path(__file__).resolve().parent / "migrations"
-    cfg = Config()
-    cfg.set_main_option("script_location", str(migrations))
-    cfg.set_main_option("sqlalchemy.url", config.database_url())
-    command.upgrade(cfg, "head")
+    from snowline_musher.db import alembic_config
+
+    command.upgrade(alembic_config(), "head")
 
 
 def create_app(
@@ -71,25 +71,23 @@ def create_app(
     `register_on_startup=False` skips the platform registration heartbeat
     entirely (tests assert registration separately, against a stubbed
     platform)."""
-    # httpx logs every request at INFO — with the registration heartbeat that
-    # is one line per beat forever. Drop ONLY the heartbeat's POST /plugins
-    # lines so other httpx traffic still traces through.
-    logging.getLogger("httpx").addFilter(_HEARTBEAT_HTTPX_FILTER)
+    if register_on_startup:
+        # httpx logs every request at INFO — with the registration heartbeat
+        # that is one line per beat forever. Installed only when the heartbeat
+        # will actually run; other httpx traffic still traces through.
+        logging.getLogger("httpx").addFilter(_HEARTBEAT_HTTPX_FILTER)
 
     @asynccontextmanager
     async def _lifespan(app: FastAPI):
-        if getattr(app.state, "migrate_on_startup", True):
+        if migrate_on_startup:
             _migrate_to_head()
-        async with contextlib.AsyncExitStack() as stack:
-            run_registration = getattr(app.state, "register_on_startup", True)
-            # The task group is UNCONDITIONAL (the house lifespan shape): only
-            # the start_soon call is gated, so a future lifespan-long loop
-            # can't silently never-start because it forgot to extend a flag
-            # disjunction, and there is exactly ONE yield/teardown path
-            # shared by production and the test factory. An empty group is
-            # free.
-            tg = await stack.enter_async_context(anyio.create_task_group())
-            if run_registration:
+        # The task group is UNCONDITIONAL (the house lifespan shape): only
+        # the start_soon call is gated, so a future lifespan-long loop
+        # can't silently never-start because it forgot to extend a flag
+        # disjunction, and there is exactly ONE yield/teardown path shared
+        # by production and the test factory. An empty group is free.
+        async with anyio.create_task_group() as tg:
+            if register_on_startup:
                 # The registration HEARTBEAT: first beat immediately (the
                 # boot registration), then a re-assert every interval so a
                 # platform restart — whose in-memory registry boots empty —
@@ -103,8 +101,6 @@ def create_app(
             tg.cancel_scope.cancel()
 
     app = FastAPI(title="Snowline Musher", lifespan=_lifespan)
-    app.state.migrate_on_startup = migrate_on_startup
-    app.state.register_on_startup = register_on_startup
 
     @app.get("/health")
     async def health() -> dict:

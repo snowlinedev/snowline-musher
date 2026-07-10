@@ -69,7 +69,10 @@ def register_with_platform(
             resp = client.post(url, json=manifest, timeout=timeout)
         else:
             resp = httpx.post(url, json=manifest, timeout=timeout)
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, httpx.InvalidURL) as exc:
+        # InvalidURL is NOT an HTTPError (it subclasses Exception directly):
+        # a typo'd SNOWLINE_PLATFORM_URL must land here as a per-beat warning,
+        # not escape the never-raises contract.
         log.warning("plugin registration to %s failed (will retry): %s", url, exc)
         return False
     if resp.status_code == httpx.codes.CONFLICT:

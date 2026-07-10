@@ -48,7 +48,7 @@ uv sync                          # install deps (incl. dev group)
 uv run pytest                    # run the test suite
 uv run ruff check .              # lint
 uv run ruff format --check .     # format check
-uv run uvicorn snowline_musher.app:app --host 127.0.0.1 --port 8804  # run the service
+uv run python -m snowline_musher    # run the service (MUSHER_BIND_HOST/MUSHER_BIND_PORT; loopback:8804 by default)
 ```
 
 The service is off by default: set `MUSHER_ENABLED=1` to enable the run
