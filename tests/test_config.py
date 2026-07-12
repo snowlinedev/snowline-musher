@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from snowline_musher import config
 
 
@@ -64,6 +66,31 @@ def test_base_url_default_and_strips_trailing_slash(monkeypatch):
     assert config.base_url() == "http://127.0.0.1:8804"
     monkeypatch.setenv("MUSHER_BASE_URL", "http://musher.example/")
     assert config.base_url() == "http://musher.example"
+
+
+def test_runs_root_defaults_under_home(monkeypatch):
+    monkeypatch.delenv("MUSHER_RUNS_ROOT", raising=False)
+    assert config.runs_root() == Path.home() / ".snowline" / "musher" / "runs"
+
+
+def test_runs_root_overridable_and_expands_user(monkeypatch):
+    monkeypatch.setenv("MUSHER_RUNS_ROOT", "/tmp/musher-runs")
+    assert config.runs_root() == Path("/tmp/musher-runs")
+    monkeypatch.setenv("MUSHER_RUNS_ROOT", "~/musher-runs")
+    assert config.runs_root() == Path.home() / "musher-runs"
+
+
+def test_workspace_retention_days_default_and_lenient(monkeypatch):
+    monkeypatch.delenv("MUSHER_WORKSPACE_RETENTION_DAYS", raising=False)
+    assert config.workspace_retention_days() == 14
+    monkeypatch.setenv("MUSHER_WORKSPACE_RETENTION_DAYS", "30")
+    assert config.workspace_retention_days() == 30
+    # A malformed or negative window must not shorten retention (GC would then
+    # delete an autopsy clone early) — warn and fall back to the generous default.
+    monkeypatch.setenv("MUSHER_WORKSPACE_RETENTION_DAYS", "not-a-number")
+    assert config.workspace_retention_days() == 14
+    monkeypatch.setenv("MUSHER_WORKSPACE_RETENTION_DAYS", "-5")
+    assert config.workspace_retention_days() == 14
 
 
 def test_heartbeat_interval_env_is_lenient(monkeypatch):

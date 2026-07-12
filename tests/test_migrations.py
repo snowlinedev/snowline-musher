@@ -19,12 +19,13 @@ def test_exactly_one_head():
     assert len(heads) == 1, f"expected exactly one alembic head, got {heads!r}"
 
 
-def test_genesis_revision_has_no_down_revision():
+def test_chain_has_single_genesis_root():
+    # The chain has exactly one root (down_revision is None) and it is the
+    # baseline genesis revision — every later migration chains off it, so the
+    # history is linear from a single base rather than forking.
     script = ScriptDirectory.from_config(alembic_config())
-    (head,) = script.get_heads()
-    revision = script.get_revision(head)
-    # The baseline migration is the sole revision in this skeleton phase.
-    assert revision.down_revision is None
+    roots = [r for r in script.walk_revisions() if r.down_revision is None]
+    assert [r.revision for r in roots] == ["63ce644e5551"]
 
 
 def test_migration_chain_applies_cleanly(migrated_db):
