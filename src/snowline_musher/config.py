@@ -30,11 +30,22 @@ Env vars:
                              or falsy, the run engine (a later phase) must not
                              do anything; the service still starts and serves
                              /health regardless of this flag.
+  MUSHER_RUNS_ROOT         — root directory under which each run gets its own
+                             `<run-id>/workspace` clone (spec §3: "Workspace
+                             per run"). Defaults to ~/.snowline/musher/runs;
+                             tests override it to a tmp path so no real
+                             home-dir state is touched.
+  MUSHER_WORKSPACE_RETENTION_DAYS — how long a terminal run's workspace is kept
+                             for autopsy before it is eligible for GC (spec §3:
+                             "kept after terminal states for autopsy and GC'd
+                             on a retention window"). Generous default; GC is a
+                             callable only in this phase, never scheduled.
 """
 
 import logging
 import math
 import os
+from pathlib import Path
 
 # Local libpq defaults (unix socket, current OS user, no password) — mirrors
 # the platform/plugin house convention. A SEPARATE database: musher owns runs
@@ -55,6 +66,16 @@ DEFAULT_BIND_PORT = 8804
 # Registration heartbeat cadence — matches the platform's health-poll default,
 # so a platform restart heals in roughly one health round.
 DEFAULT_REGISTRATION_HEARTBEAT_SECONDS = 15.0
+
+# Workspace root (spec §3): each run clones into `<runs_root>/<run-id>/workspace`.
+# A per-user default, not /tmp — workspaces are KEPT after terminal states for
+# autopsy and only GC'd on a retention window, so they must survive a reboot.
+DEFAULT_RUNS_ROOT = Path.home() / ".snowline" / "musher" / "runs"
+
+# Retention window for terminal-run workspaces (spec §3). Generous on purpose:
+# a terminal run is a readable record and its clone is the autopsy surface, so
+# the floor is comfort, not disk thrift — GC below this age never fires.
+DEFAULT_WORKSPACE_RETENTION_DAYS = 14
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
@@ -96,6 +117,43 @@ def musher_enabled() -> bool:
     Tests pin this off via an autouse fixture (pattern:
     SNOWLINE_SHADOW_TURNS_ENABLED)."""
     return os.environ.get("MUSHER_ENABLED", "").strip().lower() in _TRUTHY
+
+
+def runs_root() -> Path:
+    """Root under which per-run workspaces live (spec §3). Env-overridable so
+    tests point it at a tmp path — nothing here creates the directory; the
+    workspace module makes each run's tree on demand."""
+    raw = os.environ.get("MUSHER_RUNS_ROOT")
+    if not raw:
+        return DEFAULT_RUNS_ROOT
+    return Path(raw).expanduser()
+
+
+def workspace_retention_days() -> int:
+    """Days a terminal run's workspace is kept before GC eligibility (spec §3).
+    LENIENT on a malformed value (warn + fall back), like bind_port: a typo in
+    this knob must not make GC delete an autopsy clone early — the safe failure
+    is the generous default, not a short window."""
+    raw = os.environ.get("MUSHER_WORKSPACE_RETENTION_DAYS")
+    if not raw:
+        return DEFAULT_WORKSPACE_RETENTION_DAYS
+    try:
+        value = int(raw)
+    except ValueError:
+        logging.getLogger(__name__).warning(
+            "malformed MUSHER_WORKSPACE_RETENTION_DAYS=%r — using the default %s",
+            raw,
+            DEFAULT_WORKSPACE_RETENTION_DAYS,
+        )
+        return DEFAULT_WORKSPACE_RETENTION_DAYS
+    if value < 0:
+        logging.getLogger(__name__).warning(
+            "negative MUSHER_WORKSPACE_RETENTION_DAYS=%r — using the default %s",
+            raw,
+            DEFAULT_WORKSPACE_RETENTION_DAYS,
+        )
+        return DEFAULT_WORKSPACE_RETENTION_DAYS
+    return value
 
 
 def registration_heartbeat_seconds() -> float:
