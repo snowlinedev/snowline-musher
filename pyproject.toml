@@ -42,5 +42,5 @@ select = ["E", "F", "I"]
 
 [tool.ruff.lint.per-file-ignores]
 # Alembic's revision template emits `op`/`sa` imports an empty migration
-# never uses — a fresh `alembic revision` must not fail CI on F401.
+# never uses — a fresh `alembic revision` must not fail ruff on F401.
 "src/snowline_musher/migrations/versions/*" = ["F401"]

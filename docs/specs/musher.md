@@ -167,7 +167,10 @@ precedent):
 ## 8. Phasing
 
 1. **Skeleton** — service scaffold (uv layout per snowline-pm), platform
-   registration + SDK heartbeat, DB + alembic, `.snowline`, CI.
+   registration + SDK heartbeat, DB + alembic, `.snowline`. Verification is
+   local (pytest/ruff) plus the Snowline review loop — plugin repos carry no
+   GitHub Actions workflows (Sean, 2026-07-11: plugins provide functionality
+   for Snowline, not GitHub).
 2. **Run engine** — workspace lifecycle, carrier invocation, envelope config
    injection, timeout/kill, transcript capture, `MUSHER_ENABLED` gate.
 3. **Surfaces** — REST spine + `musher` MCP surface on the gateway.
