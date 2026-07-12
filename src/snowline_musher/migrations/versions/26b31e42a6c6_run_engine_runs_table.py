@@ -25,7 +25,11 @@ depends_on: str | Sequence[str] | None = None
 
 
 def _enum(name: str, *values: str) -> sa.Enum:
-    return sa.Enum(*values, name=name, native_enum=False, length=32)
+    # create_constraint=True is explicit: SQLAlchemy 2.x defaults it OFF for
+    # non-native enums, which would leave a bare VARCHAR accepting any string.
+    return sa.Enum(
+        *values, name=name, native_enum=False, create_constraint=True, length=32
+    )
 
 
 def upgrade() -> None:
@@ -70,15 +74,17 @@ def upgrade() -> None:
         sa.Column("pr_url", sa.Text(), nullable=True),
         sa.Column("transcript_ref", sa.Text(), nullable=True),
         sa.Column("summary", sa.Text(), nullable=True),
-        # timestamps (stored UTC)
+        # timestamps — timestamptz, so writes/reads are tz-aware regardless
+        # of the server/session timezone (naive timestamp would store local
+        # wall time on a non-UTC server and skew GC retention math).
         sa.Column(
             "created_at",
-            sa.DateTime(),
+            sa.DateTime(timezone=True),
             nullable=False,
             server_default=sa.func.now(),
         ),
-        sa.Column("started_at", sa.DateTime(), nullable=True),
-        sa.Column("finished_at", sa.DateTime(), nullable=True),
+        sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("finished_at", sa.DateTime(timezone=True), nullable=True),
     )
     # List/filter surfaces query by state and scope (spec §4.1 GET /runs).
     op.create_index("ix_runs_state", "runs", ["state"])

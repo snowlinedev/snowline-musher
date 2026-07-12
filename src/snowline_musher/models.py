@@ -20,7 +20,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Enum, Integer, String, Text, Uuid, func
+from sqlalchemy import DateTime, Enum, Integer, String, Text, Uuid, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -63,13 +63,19 @@ class RunState(enum.StrEnum):
 DEFAULT_TIMEOUT_S = 3600
 
 
-def _enum_col(py_enum: type[enum.Enum]) -> Enum:
+def _enum_col(py_enum: type[enum.Enum], name: str) -> Enum:
     """A VARCHAR-backed enum column that stores the member VALUE (not its Python
     name) — keeps the DB literal equal to the spec's wire string and dodges
-    native-Postgres-enum `ALTER TYPE` migrations when the set grows."""
+    native-Postgres-enum `ALTER TYPE` migrations when the set grows.
+    `create_constraint=True` is explicit: SQLAlchemy 2.x defaults it OFF for
+    non-native enums, which would leave a bare VARCHAR that accepts any string
+    — a bad write would then poison the row into ORM-unreadability, breaking
+    the fail-visible invariant the CHECK exists to protect."""
     return Enum(
         py_enum,
+        name=name,
         native_enum=False,
+        create_constraint=True,
         values_callable=lambda e: [m.value for m in e],
         length=32,
     )
@@ -95,7 +101,7 @@ class Run(Base):
     # Indexed for the GET /runs?scope= filter (spec §4.1).
     scope: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     carrier: Mapped[Carrier] = mapped_column(
-        _enum_col(Carrier), nullable=False, default=Carrier.claude
+        _enum_col(Carrier, "carrier"), nullable=False, default=Carrier.claude
     )
     # `--model` passthrough; from the work item's recommended_model when
     # dispatched off an item. Nullable = let the carrier pick its own default.
@@ -104,7 +110,7 @@ class Run(Base):
     timeout_s: Mapped[int] = mapped_column(
         Integer, nullable=False, default=DEFAULT_TIMEOUT_S
     )
-    origin: Mapped[Origin] = mapped_column(_enum_col(Origin), nullable=False)
+    origin: Mapped[Origin] = mapped_column(_enum_col(Origin, "origin"), nullable=False)
     # The originating ref — work-item id / GH issue (spec §2). Optional: a
     # hand-dispatched run has no upstream item.
     origin_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -112,7 +118,10 @@ class Run(Base):
     # --- lifecycle ------------------------------------------------------
     # Indexed for the GET /runs?state= filter (spec §4.1) and the GC scan.
     state: Mapped[RunState] = mapped_column(
-        _enum_col(RunState), nullable=False, default=RunState.queued, index=True
+        _enum_col(RunState, "run_state"),
+        nullable=False,
+        default=RunState.queued,
+        index=True,
     )
 
     # --- outputs (all nullable until produced) --------------------------
@@ -128,14 +137,23 @@ class Run(Base):
     # Carrier-authored closing summary.
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    # --- timestamps (stored UTC) ----------------------------------------
+    # --- timestamps -------------------------------------------------------
+    # timestamptz (timezone=True), NOT naive timestamp: a naive column makes
+    # Postgres cast writes through the SESSION timezone, so on any non-UTC
+    # server the stored wall time silently goes local while GC re-labels it
+    # UTC — skewing retention math by the offset. timestamptz round-trips
+    # tz-aware regardless of server/session timezone.
     created_at: Mapped[datetime] = mapped_column(
-        nullable=False, server_default=func.now()
+        DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     # Set on queued→running / cleared never; finished_at on entry to a terminal
     # state. Both nullable because a queued run has reached neither.
-    started_at: Mapped[datetime | None] = mapped_column(nullable=True)
-    finished_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return f"<Run {self.id} {self.state} {self.repo!r}>"
