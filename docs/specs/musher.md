@@ -1,7 +1,8 @@
 # snowline-musher — Autonomous Run Plugin
 
-> **Maturity: DRAFT** — registered as a governed Snowline artifact; graduates
-> per the standing maturity convention (first shipped item → exploratory).
+> **Maturity: EXPLORATORY** — registered as a governed Snowline artifact;
+> graduated from draft when the first item shipped (skeleton, #11,
+> 2026-07-11) per the standing maturity convention.
 >
 > Scope: `snowlinedev/snowline-musher` · Carrier decision: `7c317bdb`
 > (supersedes `4bc92633`) · Author: Sean + session, 2026-07-09
