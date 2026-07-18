@@ -161,6 +161,27 @@ def test_failed_clone_leaves_no_partial(tmp_path, source_repo):
     assert not (run_tree / "workspace.partial").exists()
 
 
+# --- run-dir sibling paths (transcript + envelope) ----------------------
+
+
+def test_transcript_and_envelope_paths_sit_beside_the_workspace(tmp_path):
+    runs_root = tmp_path / "runs"
+    rid = uuid.uuid4()
+    ws = workspace.workspace_path(rid, runs_root=runs_root)
+    transcript = workspace.transcript_path(rid, runs_root=runs_root)
+    envelope = workspace.envelope_config_path(rid, runs_root=runs_root)
+
+    # Correct shapes under <runs_root>/<run-id>/.
+    assert transcript == runs_root / str(rid) / "transcript.jsonl"
+    assert envelope == runs_root / str(rid) / "envelope.settings.json"
+    # SIBLINGS of workspace/, never inside it — so a workspace GC (which only
+    # removes workspace/) leaves both intact for autopsy (spec §2/§3).
+    assert transcript.parent == ws.parent
+    assert envelope.parent == ws.parent
+    assert ws not in transcript.parents
+    assert ws not in envelope.parents
+
+
 # --- GC (DB-backed) -----------------------------------------------------
 
 

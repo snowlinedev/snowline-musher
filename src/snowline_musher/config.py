@@ -40,6 +40,10 @@ Env vars:
                              "kept after terminal states for autopsy and GC'd
                              on a retention window"). Generous default; GC is a
                              callable only in this phase, never scheduled.
+  MUSHER_CLAUDE_BIN        — the `claude` binary the carrier invokes (spec §3).
+                             Defaults to `claude` (found on PATH); tests point
+                             it at a stub executable so the suite NEVER shells
+                             out to a real Claude Code run.
 """
 
 import logging
@@ -76,6 +80,10 @@ DEFAULT_RUNS_ROOT = Path.home() / ".snowline" / "musher" / "runs"
 # a terminal run is a readable record and its clone is the autopsy surface, so
 # the floor is comfort, not disk thrift — GC below this age never fires.
 DEFAULT_WORKSPACE_RETENTION_DAYS = 14
+
+# The carrier binary (spec §3). A bare name resolves through PATH at exec time;
+# tests override it to a stub so the suite never invokes a real Claude Code run.
+DEFAULT_CLAUDE_BIN = "claude"
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
@@ -154,6 +162,17 @@ def workspace_retention_days() -> int:
         )
         return DEFAULT_WORKSPACE_RETENTION_DAYS
     return value
+
+
+def claude_bin() -> str:
+    """The `claude` executable the carrier invokes (spec §3). A bare name is
+    resolved via PATH by the exec layer; tests set MUSHER_CLAUDE_BIN to a stub
+    path so the suite never shells out to a real carrier run. An empty/blank
+    override falls back to the default rather than trying to exec `""`."""
+    raw = os.environ.get("MUSHER_CLAUDE_BIN")
+    if not raw or not raw.strip():
+        return DEFAULT_CLAUDE_BIN
+    return raw.strip()
 
 
 def registration_heartbeat_seconds() -> float:

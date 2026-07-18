@@ -73,6 +73,38 @@ def workspace_path(run_id: uuid.UUID | str, *, runs_root: Path | None = None) ->
     return run_dir(run_id, runs_root=runs_root) / "workspace"
 
 
+def transcript_path(run_id: uuid.UUID | str, *, runs_root: Path | None = None) -> Path:
+    """The stream-json transcript path for a run:
+    `<runs_root>/<run-id>/transcript.jsonl` — a SIBLING of `workspace/`, not
+    inside the clone (spec §3). Deliberately outside the workspace so a
+    workspace GC (`gc_workspaces`, which only removes the `workspace/` dir)
+    leaves the transcript intact: a failed or timed-out run keeps its
+    transcript as the autopsy record even after its clone is reclaimed
+    (fail-visibility, spec §2)."""
+    return run_dir(run_id, runs_root=runs_root) / "transcript.jsonl"
+
+
+# The one place the envelope filename is spelled — carrier.invoke_carrier
+# derives the same sibling path from the transcript location.
+ENVELOPE_FILENAME = "envelope.settings.json"
+
+
+def envelope_config_path(
+    run_id: uuid.UUID | str, *, runs_root: Path | None = None
+) -> Path:
+    """The auto-mode envelope settings path for a run:
+    `<runs_root>/<run-id>/envelope.settings.json` — also a SIBLING of
+    `workspace/`, for two reasons. (1) It is passed to `claude` via the
+    `--settings <path>` flag, and a settings file that lives *inside* the clone
+    would be committed into the run's own PR — the envelope is the runner's
+    business, not the repo's. (2) Like the transcript, keeping it out of
+    `workspace/` means it survives a workspace GC, so a past run's enforcement
+    envelope stays readable for autopsy. See `carrier.write_envelope_config`
+    for why the flag (not a checked-in `.claude/settings.json`) is the only
+    per-run mechanism Claude Code honors for classifier rules."""
+    return run_dir(run_id, runs_root=runs_root) / ENVELOPE_FILENAME
+
+
 def _clone_url(repo: str) -> str:
     """Resolve `Run.repo` to something `git clone` may be handed.
 
