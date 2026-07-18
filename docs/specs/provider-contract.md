@@ -89,7 +89,11 @@ after dispatch (it has left the queue but remains readable):
 { "...": "...", "dispatched": true, "run_id": "0d0c…" }
 ```
 
-`404` for an id the provider has never served.
+`404` for any other id — deterministically, an id is servable iff it is
+currently in the queue (§3.1) or marked dispatched (§3.3). Items that exist
+provider-side but were never opted in (or were un-flagged before dispatch)
+are indistinguishable from nonexistent ones: a provider with a private
+backlog must not let this surface enumerate it.
 
 ### 3.3 `POST /provider/work-items/{id}/dispatched`
 
@@ -100,7 +104,7 @@ from §3.1. Idempotent, first-wins:
 - repeat with the **same** `run_id` → `200`, no-op;
 - a **different** `run_id` → `409` — the earlier dispatch stands, and the
   caller must not treat the item as its own;
-- unknown id → `404`.
+- an id not servable under §3.2's rule → `404`.
 
 Marking dispatched is a statement that a run exists, not that it succeeded.
 **Re-arming** a dispatched item (after a failed/abandoned run) is a
