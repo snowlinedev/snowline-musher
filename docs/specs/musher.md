@@ -108,19 +108,23 @@ gateway per the named-surfaces decision (`70b415fd`).
 
 ### 4.3 Work-item watcher (phase 2 — dispatch-by-API ships first)
 
-Polls a work-item source for items **explicitly opted in at triage**
-(mechanism to be settled with the source plugin — a triage destination or an
-item flag; explicitly NOT "anything in the queue"). Dispatches via
-`POST /runs` with the item ref as origin; maps `recommended_model` → `model`.
-The watcher is deliberately dumb: judgment lives at triage time, not in the
-poller.
+Polls a work-item source for items **explicitly opted in at triage**. The
+mechanism is settled (2026-07-18, with PM): a **per-item flag set at or after
+triage** — not a triage destination (opt-in is orthogonal to the source's own
+prioritization and freely reversible), and explicitly NOT "anything in the
+queue". Dispatches via `POST /runs` with the item ref as origin; maps
+`recommended_model` → `model`. The watcher is deliberately dumb: judgment
+lives at triage time, not in the poller.
 
 Because the operator's PM plugin is **private** (see §5), the watcher is
-written against a small **provider contract** — list opted-in items, read
-their refs/model hints, mark dispatched — satisfied over the platform
-gateway's surfaces, never by importing another plugin's code. The private PM
-is one provider; a public deployment without it can drive musher entirely via
-REST/MCP (e.g. from GitHub issues through snowline-gh).
+written against a small **provider contract** — list opted-in dispatch-ready
+items, read one, idempotently mark dispatched — satisfied over the platform
+gateway's surfaces, never by importing another plugin's code. The full
+contract is `docs/specs/provider-contract.md` (v1: three endpoints, opaque
+item ids as the `origin_ref` dedupe key, `MUSHER_PROVIDER_URL` names the one
+provider and unset keeps the watcher dark). The private PM is one provider; a
+public deployment without it can drive musher entirely via REST/MCP (e.g.
+from GitHub issues through snowline-gh).
 
 ## 5. Integrations
 
