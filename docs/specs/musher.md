@@ -57,9 +57,16 @@ readable record with its transcript, never a silent disappearance
   --output-format stream-json` with the objective on stdin, cwd = workspace.
   The stream-json output is the transcript of record.
 - **Envelope config.** The runner writes the auto-mode environment
-  configuration into each workspace before invocation: protected branch =
-  `base_branch`, trusted internal infra = the tailnet platform, network
-  posture, sensitive locations. The default classifier rules (allow
+  configuration for each run before invocation and hands it to the carrier
+  via `--settings` — a file in the run's own directory *beside* the clone,
+  not inside it. (Empirical, Claude Code ≥2.1.207: classifier rules are
+  honored only from user/flag/managed settings scopes; a checked-in workspace
+  settings file is deliberately ignored — a repo could otherwise whitelist
+  itself — and a file inside the clone would land in the run's PR.) The
+  envelope pins: protected branch = `base_branch`, trusted internal infra =
+  the tailnet platform. Values interpolated into the envelope prose are
+  allowlisted, not merely escaped — a hostile branch name must not be able to
+  inject classifier counter-instructions. The default classifier rules (allow
   push-to-working-branch; soft-deny push-to-default, merge-without-review,
   self-approval, destructive/exfil classes) are relied on as the floor —
   `--dangerously-skip-permissions` is **prohibited in this codebase**.

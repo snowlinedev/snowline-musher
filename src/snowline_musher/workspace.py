@@ -84,6 +84,11 @@ def transcript_path(run_id: uuid.UUID | str, *, runs_root: Path | None = None) -
     return run_dir(run_id, runs_root=runs_root) / "transcript.jsonl"
 
 
+# The one place the envelope filename is spelled — carrier.invoke_carrier
+# derives the same sibling path from the transcript location.
+ENVELOPE_FILENAME = "envelope.settings.json"
+
+
 def envelope_config_path(
     run_id: uuid.UUID | str, *, runs_root: Path | None = None
 ) -> Path:
@@ -97,7 +102,7 @@ def envelope_config_path(
     envelope stays readable for autopsy. See `carrier.write_envelope_config`
     for why the flag (not a checked-in `.claude/settings.json`) is the only
     per-run mechanism Claude Code honors for classifier rules."""
-    return run_dir(run_id, runs_root=runs_root) / "envelope.settings.json"
+    return run_dir(run_id, runs_root=runs_root) / ENVELOPE_FILENAME
 
 
 def _clone_url(repo: str) -> str:
