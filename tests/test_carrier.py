@@ -7,14 +7,20 @@ the test reads back, and self-asserts the enforcement invariants that must hold
 on EVERY invocation (permission mode `auto`, stream-json, the envelope
 `--settings` file present before it runs, no `--dangerously-skip-permissions`).
 Its exit code, stderr, and whether it emits a final result line are all driven
-by env vars so one stub covers happy-path, failure, and crash-mid-stream.
+by env vars so one stub covers happy-path, failure, and crash-mid-stream. A
+`STUB_HANG=1` mode makes it write its own pid to `STUB_PID_FILE` and sleep for
+an hour — so timeout/cancel tests exercise the REAL SIGKILL-the-process-group
+path (spec §3, the turn-runner lesson) with no real carrier ever invoked.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import stat
 import sys
+import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -26,7 +32,7 @@ from snowline_musher.models import Carrier, Origin, Run
 # The stub asserts these itself and exits non-zero on violation, so a regression
 # that widened the envelope would fail the test even before its own assertions.
 _STUB_BODY = r"""
-import json, os, pathlib, sys
+import json, os, pathlib, sys, time
 
 argv = sys.argv[1:]
 record_dir = pathlib.Path(os.environ["STUB_RECORD_DIR"])
@@ -65,12 +71,26 @@ record_dir.mkdir(parents=True, exist_ok=True)
 if os.environ.get("STUB_STDERR"):
     sys.stderr.write(os.environ["STUB_STDERR"])
 
-for obj in (
-    {"type": "system", "subtype": "init", "session_id": "stub"},
-    {"type": "assistant", "message": {"content": "working on it"}},
-):
-    sys.stdout.write(json.dumps(obj) + "\n")
-    sys.stdout.flush()
+sys.stdout.write(
+    json.dumps({"type": "system", "subtype": "init", "session_id": "stub"}) + "\n"
+)
+sys.stdout.flush()
+
+if os.environ.get("STUB_HANG") == "1":
+    # Its OWN process — never reads/handles signals specially — so a real
+    # SIGKILL of the process GROUP (not just this pid) is what proves the
+    # kill mechanism, not a cooperative exit. Write our pid before sleeping so
+    # the test can confirm we're really gone afterwards.
+    pid_file = os.environ.get("STUB_PID_FILE")
+    if pid_file:
+        pathlib.Path(pid_file).write_text(str(os.getpid()))
+    time.sleep(3600)
+    sys.exit(0)  # unreachable in a passing test — the parent kills us first
+
+sys.stdout.write(
+    json.dumps({"type": "assistant", "message": {"content": "working on it"}}) + "\n"
+)
+sys.stdout.flush()
 
 if os.environ.get("STUB_NO_RESULT") != "1":
     sys.stdout.write(
@@ -384,3 +404,97 @@ def test_ordinary_branch_and_model_values_pass(tmp_path):
     run = _run(model="us.anthropic.claude-opus-4-8:0")
     argv = carrier._build_claude_argv(run, Path("/x"))
     assert "us.anthropic.claude-opus-4-8:0" in argv
+
+
+# --- timeout / cancel: process-group SIGKILL (spec §3) ---------------------
+
+
+def test_timeout_sigkills_process_group(tmp_path, stub_claude, monkeypatch):
+    """A hung carrier is SIGKILLed as a whole process group once `timeout_s`
+    elapses — not left running for the full (much larger) hang duration."""
+    pid_file = tmp_path / "stub.pid"
+    monkeypatch.setenv("STUB_HANG", "1")
+    monkeypatch.setenv("STUB_PID_FILE", str(pid_file))
+    run = _run()
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    transcript = workspace.transcript_path(run.id, runs_root=tmp_path / "runs")
+
+    start = time.monotonic()
+    result = carrier.invoke_carrier(
+        run, ws, transcript_path=transcript, timeout_s=0.5
+    )
+    elapsed = time.monotonic() - start
+
+    assert result.kill_reason == "timeout"
+    assert result.exit_code < 0  # killed by a signal, not a normal exit
+    # Bounded by the timeout, nowhere near the stub's 3600s hang duration.
+    assert elapsed < 10
+
+    # Fail-visible: the transcript the stub streamed before being killed
+    # (the init line) is still on disk.
+    assert transcript.is_file()
+    assert transcript.read_text().strip()
+
+    # No orphan: the stub (and its process group — it IS the group leader,
+    # start_new_session=True) is really gone, not merely unresponsive.
+    assert pid_file.is_file()
+    pid = int(pid_file.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+def test_cancel_event_sigkills_process_group(tmp_path, stub_claude, monkeypatch):
+    """Setting `cancel_event` kills the same way a timeout does, even with a
+    much larger `timeout_s` still pending — cancel wins the race."""
+    pid_file = tmp_path / "stub.pid"
+    monkeypatch.setenv("STUB_HANG", "1")
+    monkeypatch.setenv("STUB_PID_FILE", str(pid_file))
+    run = _run()
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    transcript = workspace.transcript_path(run.id, runs_root=tmp_path / "runs")
+
+    cancel_event = threading.Event()
+    timer = threading.Timer(0.3, cancel_event.set)
+    timer.start()
+    try:
+        start = time.monotonic()
+        result = carrier.invoke_carrier(
+            run,
+            ws,
+            transcript_path=transcript,
+            timeout_s=30,  # far larger than the cancel delay — cancel must win
+            cancel_event=cancel_event,
+        )
+        elapsed = time.monotonic() - start
+    finally:
+        timer.cancel()
+
+    assert result.kill_reason == "cancel"
+    assert result.exit_code < 0
+    assert elapsed < 10
+
+    assert transcript.is_file()
+    assert transcript.read_text().strip()
+
+    assert pid_file.is_file()
+    pid = int(pid_file.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+def test_no_kill_reason_on_ordinary_completion(tmp_path, stub_claude):
+    # A carrier that runs to completion (success or failure) is not confused
+    # with a timeout/cancel outcome.
+    run = _run()
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    transcript = workspace.transcript_path(run.id, runs_root=tmp_path / "runs")
+
+    result = carrier.invoke_carrier(
+        run, ws, transcript_path=transcript, timeout_s=30
+    )
+
+    assert result.kill_reason is None
+    assert result.exit_code == 0
