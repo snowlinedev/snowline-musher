@@ -350,6 +350,11 @@ def invoke_carrier(
                 stdout=subprocess.PIPE,
                 stderr=stderr_file,
                 text=True,
+                # Never let a stray non-UTF-8 byte in the carrier's stdout
+                # (a crashing process can dump binary) raise mid-stream and
+                # blow up the reader — the transcript is an autopsy surface,
+                # not a strict parse target, so replace undecodable bytes.
+                errors="replace",
                 # New session + process group: a kill must reach every
                 # descendant the carrier spawns, not just the direct child
                 # (the turn-runner lesson — see module docstring).
@@ -412,6 +417,18 @@ def invoke_carrier(
             watchdog_state["done"] = True
         watchdog.join()
         kill_reason = watchdog_state["reason"]
+
+        # Reconcile the watchdog's PRE-reap decision against the real exit
+        # status. The watchdog stamps `reason` and fires `killpg` BEFORE the
+        # main thread publishes `done` above — so a carrier that exited on its
+        # OWN in the window between its exit and `proc.wait()` returning could
+        # have had a reason stamped and a (no-op, ProcessLookupError) kill fired
+        # at an already-dead pid. Our SIGKILL of the group-leader child yields
+        # exactly `-SIGKILL`; any other status means the carrier ended for its
+        # own reasons and the stamped reason is stale — drop it so a run that
+        # actually succeeded is not mislabeled `cancelled`/`timed_out`.
+        if kill_reason is not None and exit_code != -signal.SIGKILL:
+            kill_reason = None
 
         stderr_file.seek(0, 2)
         size = stderr_file.tell()

@@ -84,6 +84,24 @@ if os.environ.get("STUB_HANG") == "1":
     pid_file = os.environ.get("STUB_PID_FILE")
     if pid_file:
         pathlib.Path(pid_file).write_text(str(os.getpid()))
+    # Optionally fork a GRANDCHILD that stays in the same process group and
+    # sleeps too. It closes the inherited std fds first so the parent's stdout
+    # pipe still reaches EOF the instant WE die (otherwise a proc.kill()
+    # regression that killed only the leader would hang the reader instead of
+    # failing an assertion). A group SIGKILL reaps the grandchild as well; a
+    # single-process kill would leave it alive — that is the discriminator.
+    child_pid_file = os.environ.get("STUB_CHILD_PID_FILE")
+    if child_pid_file:
+        grandchild = os.fork()
+        if grandchild == 0:
+            for fd in (0, 1, 2):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            time.sleep(3600)
+            os._exit(0)
+        pathlib.Path(child_pid_file).write_text(str(grandchild))
     time.sleep(3600)
     sys.exit(0)  # unreachable in a passing test — the parent kills us first
 
@@ -482,6 +500,47 @@ def test_cancel_event_sigkills_process_group(tmp_path, stub_claude, monkeypatch)
     pid = int(pid_file.read_text())
     with pytest.raises(ProcessLookupError):
         os.kill(pid, 0)
+
+
+def _wait_pid_gone(pid: int, timeout_s: float = 5.0) -> bool:
+    """Poll until `pid` no longer exists (an orphaned grandchild is reaped
+    asynchronously after its group is SIGKILLed). Returns True once gone."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def test_timeout_sigkills_whole_group_including_grandchildren(
+    tmp_path, stub_claude, monkeypatch
+):
+    """The kill reaches the WHOLE process group, not just the direct child: a
+    grandchild the carrier forked is gone too. This is the turn-runner lesson
+    the change exists for — a regression from os.killpg to proc.kill() (leader
+    only) would leave the grandchild alive and fail here."""
+    pid_file = tmp_path / "stub.pid"
+    child_pid_file = tmp_path / "grandchild.pid"
+    monkeypatch.setenv("STUB_HANG", "1")
+    monkeypatch.setenv("STUB_PID_FILE", str(pid_file))
+    monkeypatch.setenv("STUB_CHILD_PID_FILE", str(child_pid_file))
+    run = _run()
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    transcript = workspace.transcript_path(run.id, runs_root=tmp_path / "runs")
+
+    result = carrier.invoke_carrier(run, ws, transcript_path=transcript, timeout_s=0.5)
+
+    assert result.kill_reason == "timeout"
+    # Both the carrier (group leader) AND the grandchild it forked are gone.
+    assert pid_file.is_file() and child_pid_file.is_file()
+    leader = int(pid_file.read_text())
+    grandchild = int(child_pid_file.read_text())
+    assert _wait_pid_gone(leader), "carrier leader survived the group kill"
+    assert _wait_pid_gone(grandchild), "grandchild survived — only leader killed"
 
 
 def test_no_kill_reason_on_ordinary_completion(tmp_path, stub_claude):

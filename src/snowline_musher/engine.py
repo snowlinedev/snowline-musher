@@ -40,10 +40,10 @@ from sqlalchemy.orm import Session
 
 from snowline_musher import config, runs
 from snowline_musher import workspace as workspace_mod
-from snowline_musher.carrier import CarrierError, invoke_carrier
+from snowline_musher.carrier import invoke_carrier
 from snowline_musher.db import session_scope
 from snowline_musher.models import Run, RunState
-from snowline_musher.workspace import WorkspaceError, create_workspace
+from snowline_musher.workspace import create_workspace
 
 log = logging.getLogger("snowline_musher.engine")
 
@@ -79,17 +79,19 @@ def execute_run(
       - `exit_code == 0`           → `succeeded`
       - otherwise                  → `failed`
 
-    Fail-visible on infrastructure failure (spec §2): if `create_workspace`
-    raises `WorkspaceError` or `invoke_carrier` raises `CarrierError`, this
-    function does NOT let the exception escape. It logs the failure, transitions
-    the run to `failed`, commits, and returns the run — the run row itself is
-    the durable record of what happened (its state says "failed"; the log line
-    carries the detail, since there is no dedicated error-text column on `Run`
-    yet). The alternative (re-raising after transitioning) would push the
-    "did this actually fail visibly" judgment onto every caller; catching here
-    means `drain` can loop over runs without a try/except of its own and a
-    crash inside one run's infrastructure never wedges that run `running`
-    forever nor aborts the rest of the batch.
+    Fail-visible on ANY failure (spec §2): if anything between the `running`
+    transition and the terminal one raises — an expected infrastructure error
+    (`WorkspaceError` from a bad clone, `CarrierError` from a missing binary)
+    OR an unexpected one (a decode error on garbage carrier output, a DB hiccup
+    on commit) — this function does NOT let the exception escape. It logs the
+    failure (with a stack trace, since there is no dedicated error-text column
+    on `Run` yet), transitions the run to `failed`, commits, and returns the
+    run — the run row itself is the durable record. The alternative (letting it
+    escape) would leave the row wedged `running` forever AND abort the whole
+    `drain` batch on the first pathological run; catching here means `drain`
+    loops without a try/except of its own and one bad run never stops the rest.
+    `KeyboardInterrupt`/`SystemExit` are NOT swallowed (they are not
+    `Exception`) — a real interrupt still propagates.
 
     Commits happen at two points: right after entering `running` (durability —
     a crash between here and the terminal transition leaves the row correctly
@@ -111,29 +113,35 @@ def execute_run(
             timeout_s=run.timeout_s,
             cancel_event=cancel_event,
         )
-    except (WorkspaceError, CarrierError) as exc:
-        log.error(
-            "run %s: infrastructure failure before a terminal outcome: %s",
-            run.id,
-            exc,
-        )
-        runs.transition(run, RunState.failed)
+
+        run.transcript_ref = str(result.transcript_path)
+        run.summary = result.summary
+
+        if result.kill_reason is not None:
+            dst = _KILL_REASON_STATE[result.kill_reason]
+        elif result.exit_code == 0:
+            dst = RunState.succeeded
+        else:
+            dst = RunState.failed
+
+        runs.transition(run, dst)
         session.commit()
         return run
-
-    run.transcript_ref = str(result.transcript_path)
-    run.summary = result.summary
-
-    if result.kill_reason is not None:
-        dst = _KILL_REASON_STATE[result.kill_reason]
-    elif result.exit_code == 0:
-        dst = RunState.succeeded
-    else:
-        dst = RunState.failed
-
-    runs.transition(run, dst)
-    session.commit()
-    return run
+    except Exception:
+        # Fail-visible catch-all (spec §2) — see the docstring. Whatever went
+        # wrong, the run must land terminal, never wedge `running`, and `drain`
+        # must be able to move on. rollback() first so a poisoned/partial
+        # transaction (e.g. the terminal commit itself failed) is cleared
+        # before we write `failed`; the `running` state was already committed,
+        # so the guard below sees the reloaded `running` and advances it.
+        log.error(
+            "run %s: failed before a clean terminal outcome", run.id, exc_info=True
+        )
+        session.rollback()
+        if not runs.is_terminal(run.state):
+            runs.transition(run, RunState.failed)
+            session.commit()
+        return run
 
 
 def drain(
