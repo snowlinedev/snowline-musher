@@ -39,27 +39,51 @@ auto-mode environment file and hands it to `claude` via `--settings <path>`.
   "Include the literal string \"$defaults\" to inherit the built-in entries".
 
 The transcript is streamed to disk as it arrives (never the whole run buffered
-in memory); stderr is captured separately and bounded. Timeout / SIGKILL /
-process-group handling is deliberately NOT here — the next work item reworks
-the subprocess call; this one keeps it simple.
+in memory); stderr is captured separately and bounded.
+
+Timeout / cancellation (spec §3, the turn-runner lesson). The subprocess
+launches in its OWN session/process group (`start_new_session=True`) so a
+SIGKILL reaches every descendant it may have spawned, not just the direct
+child — an orphaned grandchild left running is exactly the failure mode the
+turn-runner lesson names. A single watchdog thread races `cancel_event`
+against `timeout_s`; whichever fires first SIGKILLs the WHOLE group via
+`os.killpg(os.getpgid(proc.pid), signal.SIGKILL)`. There is no SIGTERM grace
+period — the spec says "SIGKILL the process group on timeout", not "ask
+nicely first". The watchdog polls in short slices rather than a single
+blocking wait, so a run that finishes on its own is noticed promptly and the
+thread is joined without parking for the rest of `timeout_s`. Which reason
+fired (`"timeout"` vs `"cancel"`, or neither) rides back on `CarrierResult.
+kill_reason`.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import signal
 import subprocess
 import tempfile
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from snowline_musher import config
 from snowline_musher import workspace as workspace_mod
-from snowline_musher.models import Carrier, Run
+from snowline_musher.models import DEFAULT_TIMEOUT_S, Carrier, Run
 
 log = logging.getLogger("snowline_musher.carrier")
+
+# The watchdog polls in slices this short rather than blocking on a single
+# `cancel_event.wait(timeout_s)`, so a run that finishes on its own is noticed
+# — and the watchdog thread returns without ever touching killpg — within one
+# slice instead of parking for the remainder of `timeout_s` (which, at the
+# 3600s default, would otherwise make a normal happy-path return take up to an
+# hour to observe).
+_WATCHDOG_POLL_S = 0.05
 
 # Values interpolated into the classifier envelope PROSE or the argv are
 # allowlisted, not merely escaped: the envelope is natural-language enforcement
@@ -95,12 +119,20 @@ class CarrierResult:
     the caller maps the exit code onto a terminal run state. `summary` is the
     carrier-authored closing summary lifted from the final `result`-type
     stream-json line, or None when the run emitted no result line (e.g. it
-    crashed mid-stream)."""
+    crashed mid-stream).
+
+    `kill_reason` is `"timeout"` when the watchdog's wall-clock deadline fired,
+    `"cancel"` when `cancel_event` fired first, or `None` when the carrier ran
+    to completion on its own — whether that completion was exit 0 or a
+    non-zero exit. A non-zero exit with `kill_reason is None` is an ordinary
+    fail-visible failure, NOT a timeout/cancel. Appended after the original
+    fields with a default so existing call sites/constructions stay valid."""
 
     exit_code: int
     transcript_path: Path
     summary: str | None
     stderr: str
+    kill_reason: str | None = None
 
 
 def write_envelope_config(
@@ -203,8 +235,55 @@ def _extract_summary(line: str, current: str | None) -> str | None:
     return current
 
 
+def _watch_and_kill(
+    proc: subprocess.Popen[str],
+    cancel_event: threading.Event,
+    timeout_s: float,
+    state: dict[str, bool | str | None],
+    lock: threading.Lock,
+) -> None:
+    """The watchdog body (run on its own thread). Polls in `_WATCHDOG_POLL_S`
+    slices — using `cancel_event.wait()` itself as the sleep, so a real
+    cancellation is noticed within one slice rather than at the next poll
+    boundary — until either `cancel_event` fires or `timeout_s` elapses, or the
+    main thread flags `state["done"]` (the carrier finished on its own; no kill
+    needed). The decision of WHICH of those happened is made and recorded under
+    `lock` before `killpg` runs, so `invoke_carrier` reads back `state["reason"]`
+    race-free after `join()` — and the `state["done"]` check is repeated inside
+    the lock (a double check) so a carrier that finishes in the tiny window
+    between the loop's last poll and the kill is not shot anyway."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        remaining = deadline - time.monotonic()
+        if cancel_event.wait(min(_WATCHDOG_POLL_S, max(remaining, 0.0))):
+            reason = "cancel"
+            break
+        with lock:
+            if state["done"]:
+                return  # the carrier exited on its own — nothing to kill
+        if remaining <= 0:
+            reason = "timeout"
+            break
+
+    with lock:
+        if state["done"]:
+            return
+        state["reason"] = reason
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except ProcessLookupError:
+        # The carrier exited between the wait above returning and this kill —
+        # already gone, nothing left to do.
+        pass
+
+
 def invoke_carrier(
-    run: Run, workspace: Path, *, transcript_path: Path
+    run: Run,
+    workspace: Path,
+    *,
+    transcript_path: Path,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
+    cancel_event: threading.Event | None = None,
 ) -> CarrierResult:
     """Run `run`'s carrier against `workspace` and capture the stream-json
     transcript (spec §1, §3).
@@ -215,7 +294,17 @@ def invoke_carrier(
     incrementally, captures a bounded stderr tail, and returns a `CarrierResult`
     with the exit code and the carrier-authored closing summary. A carrier that
     exits non-zero is a fail-visible result, not an exception; only an
-    unimplemented carrier or a missing binary raises `CarrierError`."""
+    unimplemented carrier or a missing binary raises `CarrierError`.
+
+    `timeout_s` bounds the carrier's wall-clock run time; on expiry (or on
+    `cancel_event` being set first, whichever comes first) the WHOLE process
+    group is SIGKILLed — see the module docstring. `cancel_event` defaults to
+    a private, never-set `Event` when omitted, so the watchdog's wait then acts
+    as a plain timeout with no cancellation path. Either kill reaches the
+    subprocess the same way: the `for line in proc.stdout` loop simply hits EOF
+    and `proc.wait()` returns a negative code (killed by SIGKILL); the caller
+    tells timeout apart from cancel apart from an ordinary exit via
+    `CarrierResult.kill_reason`."""
     if run.carrier is not Carrier.claude:
         raise CarrierError(
             f"unsupported carrier {run.carrier!r} — v1 is Claude-only (spec §1); "
@@ -243,11 +332,15 @@ def invoke_carrier(
     argv = _build_claude_argv(run, envelope_path)
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
 
+    if cancel_event is None:
+        # A fresh, private Event that nothing ever sets — the watchdog's wait
+        # then behaves as a plain timeout with no cancellation path.
+        cancel_event = threading.Event()
+
     summary: str | None = None
     # stderr goes to a temp file, not a pipe: draining a second pipe while
-    # streaming stdout risks a deadlock if either OS buffer fills, and this
-    # phase keeps the subprocess call simple (the next item reworks it with
-    # timeout/kill handling). We read a bounded tail back afterwards.
+    # streaming stdout risks a deadlock if either OS buffer fills. We read a
+    # bounded tail back afterwards.
     with tempfile.TemporaryFile() as stderr_file:
         try:
             proc = subprocess.Popen(
@@ -257,6 +350,15 @@ def invoke_carrier(
                 stdout=subprocess.PIPE,
                 stderr=stderr_file,
                 text=True,
+                # Never let a stray non-UTF-8 byte in the carrier's stdout
+                # (a crashing process can dump binary) raise mid-stream and
+                # blow up the reader — the transcript is an autopsy surface,
+                # not a strict parse target, so replace undecodable bytes.
+                errors="replace",
+                # New session + process group: a kill must reach every
+                # descendant the carrier spawns, not just the direct child
+                # (the turn-runner lesson — see module docstring).
+                start_new_session=True,
             )
         except FileNotFoundError as exc:
             # A missing binary is a loud, typed error (config points here) — not
@@ -265,6 +367,19 @@ def invoke_carrier(
                 f"carrier binary {config.claude_bin()!r} not found "
                 "(set MUSHER_CLAUDE_BIN) — cannot start the run"
             ) from exc
+
+        # Started immediately after Popen — before the stdin write below —
+        # so a carrier that hangs without ever reading stdin (a real deadlock,
+        # not just a slow start) is still bounded by timeout_s: SIGKILLing the
+        # group unblocks a blocked stdin.write() too.
+        watchdog_state: dict[str, bool | str | None] = {"done": False, "reason": None}
+        watchdog_lock = threading.Lock()
+        watchdog = threading.Thread(
+            target=_watch_and_kill,
+            args=(proc, cancel_event, timeout_s, watchdog_state, watchdog_lock),
+            daemon=True,
+        )
+        watchdog.start()
 
         assert proc.stdin is not None and proc.stdout is not None
         # The objective is the whole prompt; carriers consume the -p stdin at
@@ -295,12 +410,40 @@ def invoke_carrier(
                 summary = _extract_summary(line, summary)
         exit_code = proc.wait()
 
+        # Flag completion under the same lock the watchdog checks before it
+        # decides to kill, then join it — race-free read-back of the reason
+        # (see _watch_and_kill).
+        with watchdog_lock:
+            watchdog_state["done"] = True
+        watchdog.join()
+        kill_reason = watchdog_state["reason"]
+
+        # Reconcile the watchdog's PRE-reap decision against the real exit
+        # status. The watchdog stamps `reason` and fires `killpg` BEFORE the
+        # main thread publishes `done` above — so a carrier that exited on its
+        # OWN in the window between its exit and `proc.wait()` returning could
+        # have had a reason stamped and a (no-op, ProcessLookupError) kill fired
+        # at an already-dead pid. Our SIGKILL of the group-leader child yields
+        # exactly `-SIGKILL`; any other status means the carrier ended for its
+        # own reasons and the stamped reason is stale — drop it so a run that
+        # actually succeeded is not mislabeled `cancelled`/`timed_out`.
+        if kill_reason is not None and exit_code != -signal.SIGKILL:
+            kill_reason = None
+
         stderr_file.seek(0, 2)
         size = stderr_file.tell()
         stderr_file.seek(max(0, size - STDERR_TAIL_BYTES))
         stderr = stderr_file.read().decode("utf-8", errors="replace")
 
-    if exit_code != 0:
+    if kill_reason is not None:
+        log.warning(
+            "carrier run %s was SIGKILLed (%s) — process group killed, "
+            "transcript at %s",
+            run.id,
+            kill_reason,
+            transcript_path,
+        )
+    elif exit_code != 0:
         log.warning(
             "carrier run %s exited %s — fail-visible; transcript at %s",
             run.id,
@@ -312,4 +455,5 @@ def invoke_carrier(
         transcript_path=transcript_path,
         summary=summary,
         stderr=stderr,
+        kill_reason=kill_reason,
     )
